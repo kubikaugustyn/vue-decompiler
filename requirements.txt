@@ -1,0 +1,2 @@
+esprima~=4.0.1
+jsbeautifier~=1.14.9
