@@ -1,10 +1,10 @@
 #  -*- coding: utf-8 -*-
 __author__ = "kubik.augustyn@post.cz"
 
-from abc import abstractmethod
+from abc import abstractmethod, ABC
 
 
-class DecompilerUI:
+class DecompilerUI(ABC):
     @abstractmethod
     def ask(self, question: str) -> str:
         raise NotImplementedError("You need to use subclass of DecompilerUI")

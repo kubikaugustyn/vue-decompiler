@@ -1,2 +1,2 @@
-esprima~=4.0.1
-jsbeautifier~=1.14.9
+jsbeautifier~=1.14.11
+# kutil>=1.0.0 # Not currently on PyPI, see #3, do not download from PyPI
