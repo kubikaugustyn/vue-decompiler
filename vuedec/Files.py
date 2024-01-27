@@ -30,7 +30,16 @@ class Files:
     def get(self, file_name: str) -> str:
         return self.getRaw(file_name).decode("utf-8")
 
+    def setRaw(self, file_name: str, data: bytes):
+        self.__cache[file_name] = data
+        path = os.path.join(self.path, file_name)
+        with open(path, "wb+") as f:
+            f.write(data)
+
+    def set(self, file_name: str, data: str):
+        self.setRaw(file_name, data.encode("utf-8"))
+
 
 if __name__ == '__main__':
-    f = Files("")
-    print(f.get("Files.py"))
+    files = Files("")
+    print(files.get("Files.py"))

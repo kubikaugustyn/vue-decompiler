@@ -9,6 +9,9 @@ from kutil.language.languages.javascript import parseModule, nodes, Module
 from kutil.language.languages.javascript.JSOptions import JSOptions
 from kutil.language.languages.javascript.syntax import JSNode, JSToken
 from kutil.language.languages.javascript.JSLexer import RawToken
+
+
+from vuedec.types import TComponent
 from vuedec.DecompilerUI import DecompilerUI
 from vuedec.Cache import Cache  # In future from kutil.storage.Cache import Cache
 from vuedec.Files import Files
@@ -25,6 +28,8 @@ class JSParser:
     ast: AST | None
     entryPoint: Module | None
 
+    componentMap: dict[str, tuple[TComponent, nodes.VariableDeclarator, str]]
+
     def __init__(self, files: Files, file_name: str, ui: DecompilerUI, cache_path: str,
                  immediately_parse=True):
         self.files = files
@@ -33,6 +38,9 @@ class JSParser:
         self.cache = Cache("js-parser", cache_path)
         self.ast = None
         self.entryPoint = None
+
+        self.componentMap = {}
+
         if immediately_parse:
             self.parse()
 
@@ -80,3 +88,13 @@ class JSParser:
         self.ast, self.entryPoint = parseModule(beautified_file, options)
         print(" - DONE")
         return self.ast, self.entryPoint
+
+    def registerComponent(self, component: TComponent, name: str, varName: str,
+                          varNode: nodes.VariableDeclarator):
+        self.componentMap[name] = (component, varNode, varName)
+
+    def findComponentNameByVarName(self, varName: str) -> str:
+        for key, (_, _, cmpVarName) in self.componentMap.items():
+            if cmpVarName == varName:
+                return key
+        raise KeyError("Component var name not found")

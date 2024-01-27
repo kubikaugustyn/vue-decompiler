@@ -48,7 +48,7 @@ class VueDecompiler:
             self.mainFileName = u.ask("Enter main file name: ")
         i = JSParser(f, self.mainFileName, u, self.cache, immediately_parse=False)
         self.extractFunctionNames(i)
-        print(self.functionMap)
+        # print(self.functionMap)
         other_file_name = "Badges.js" if f.has("Badges.js") else u.ask("Enter other file name: ")
         other_file = JSParser(f, other_file_name, u, self.cache)
         self.decompileFile(other_file)
@@ -160,7 +160,8 @@ class VueDecompiler:
         return call
 
     def findComponentDefinitions(self, knownName: str, moduleNodes: list[ASTNode], ast: AST,
-                                 fnMap: dict[str, str], srcFile: JSParser) \
+                                 fnMap: dict[str, str], fnReverseMap: dict[str, str],
+                                 srcFile: JSParser) \
             -> tuple[Component, list[Component]]:
         returnKnown: Component | None = None
         returnOthers: list[Component] = []
@@ -199,8 +200,9 @@ class VueDecompiler:
                     renderMethod = self.findMethodDeclarator(renderFnName, moduleNodes, ast)
 
                     cmp: Component = Component(srcFile, ast, moduleNodes, cmpDefinition,
-                                               renderMethod)
-
+                                               renderMethod, fnMap, fnReverseMap, self.mainFileName)
+                    srcFile.registerComponent(cmp, cmp.extractName(), cmpName,
+                                              declarator)
                     if cmpName == knownName:
                         returnKnown = cmp
                     else:
@@ -235,6 +237,8 @@ class VueDecompiler:
         if self.decompiledCache.has(parser.file_name):
             return self.decompiledCache.get(parser.file_name)
 
+        print(f"Decompiling {parser.file_name}", end="")
+
         ast = parser.ast
         module = parser.entryPoint
         moduleNodes = ast.getNodes(module.body)
@@ -247,12 +251,16 @@ class VueDecompiler:
         spec: ASTNode = ast.getNode(export.specifiers[0])
         assert isinstance(spec, nodes.ExportSpecifier)
         componentVarName = self.getIdentifierName(ast.getNode(spec.local))
-        print(componentVarName)
+        # print(componentVarName)
 
         mainComponent, otherComponents = self.findComponentDefinitions(componentVarName,
                                                                        moduleNodes, ast, fnMap,
+                                                                       fnReverseMap,
                                                                        parser)
+        componentNames = [mainComponent.extractName()]
 
         mainComponent.decompile(self.target)
         for other in otherComponents:
             other.decompile(self.target)
+            componentNames.append(other.extractName())
+        print(f" - DONE (components: {', '.join(componentNames)})")
