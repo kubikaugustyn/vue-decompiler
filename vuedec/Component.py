@@ -4,7 +4,6 @@ __author__ = "kubik.augustyn@post.cz"
 from kutil.language.AST import AST, ASTNode
 from kutil.language.languages.javascript import nodes
 from kutil.language.languages.javascript.syntax import JSNode
-from kutil.typing import chain
 
 from vuedec import JSParser, Files
 
@@ -21,6 +20,11 @@ _VUE_FUNCTIONS: set[str] = {  # TODO add all
     'createElementBlock', 'defineComponent', 'createBlock', 'createBaseVNode', 'createCommentVNode',
     'createVNode', '_export_sfc', 'ref', 'withCtx', 'openBlock'
 }
+_VUE_RENDER_ARGUMENTS: list[str] = ["_ctx", "_cache", "$props", "$setup", "$data", "$options"]
+
+__all__ = [
+    "Component", "_VUE_RENDER_ARGUMENTS"
+]
 
 
 class Component:
@@ -75,23 +79,49 @@ class Component:
                 except IndexError:
                     pass  # Maybe a bad index?
 
-    def mapFunctions(self, node: nodes.Node, saveImports: bool):
+    def mapFunctions(self, node: nodes.Node, isRenderMethod: bool,
+                     isInsideRenderMethod: bool = False):
         """
         Changes the function names to their corresponding names in functionMap.
         """
-        for parent, callee in self._traverseFromNode(node):
-            if callee.type == JSNode.Identifier and parent.type == JSNode.CallExpression:
-                assert isinstance(callee, nodes.Identifier)
-                assert isinstance(parent, nodes.CallExpression)
-                if callee.name not in self.functionReverseMap:
+        if isRenderMethod and isInsideRenderMethod:
+            raise ValueError("Cannot be a render method while being inside it")
+
+        argMap = {}
+        if isRenderMethod:
+            assert isinstance(node, nodes.FunctionDeclaration)
+            for arg, mapToName in zip(_VUE_RENDER_ARGUMENTS, self.ast.getNodes(node.params)):
+                assert isinstance(mapToName, nodes.Identifier)
+                argMap[mapToName.name] = arg
+
+        for parent, identifier in self._traverseFromNode(node):
+            if identifier.type is JSNode.Identifier:
+                assert isinstance(identifier, nodes.Identifier)
+                if isRenderMethod and identifier.name in argMap:
+                    # Map obfuscated argument names to their readable opposites
+                    identifier.name = argMap[identifier.name]
+
+                    if (identifier.name == _VUE_RENDER_ARGUMENTS[0] and
+                            parent.type is JSNode.MemberExpression):
+                        # Change _ctx.thing to thing (used inside the template)
+                        assert isinstance(parent, nodes.StaticMemberExpression)
+                        assert not parent.computed and not parent.optionalChain
+                        srcProp = self.ast.getNode(parent.property)
+                        assert isinstance(srcProp, nodes.Node)
+                        self.ast.replaceNode(parent, srcProp.clone())
+
                     continue
-                callee.name = self.functionReverseMap[callee.name]
-                if not saveImports:
+                if (identifier.name not in self.functionReverseMap or
+                        parent.type is not JSNode.CallExpression):
                     continue
-                if callee.name in _VUE_FUNCTIONS:
-                    self.vueImports.add(callee.name)
+                # Map imported thing to its index.js local name
+                identifier.name = self.functionReverseMap[identifier.name]
+                if isRenderMethod or isInsideRenderMethod:
+                    continue
+                if identifier.name in _VUE_FUNCTIONS:
+                    self.vueImports.add(identifier.name)
                 else:
-                    self.mainImports.add(callee.name)
+                    self.mainImports.add(identifier.name)
         # if saveImports:
         #     print("VUE:", self.vueImports)
         #     print("MAIN:", self.mainImports)
@@ -137,8 +167,8 @@ class Component:
 
         output = _TEMPLATE
 
-        self.mapFunctions(self.definition, True)
-        self.mapFunctions(self.renderMethod, False)
+        self.mapFunctions(self.definition, False)
+        self.mapFunctions(self.renderMethod, True)
 
         try:
             componentImports = self.mapComponents(self.definition.getByKey("components", self.ast))
