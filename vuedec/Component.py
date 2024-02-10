@@ -1,6 +1,8 @@
 #  -*- coding: utf-8 -*-
 __author__ = "kubik.augustyn@post.cz"
 
+import random
+
 from kutil.language.AST import AST, ASTNode
 from kutil.language.languages.javascript import nodes
 from kutil.language.languages.javascript.syntax import JSNode
@@ -33,7 +35,7 @@ class Component:
     moduleNodes: list[ASTNode]
     name: str
     definition: nodes.ObjectExpression  # In future also support the function version
-    renderMethod: nodes.FunctionDeclaration
+    renderMethod: nodes.FunctionDeclaration | None
     functionMap: dict[str, str]
     functionReverseMap: dict[str, str]
     mainFileName: str
@@ -129,6 +131,8 @@ class Component:
     def findNonMainImports(self) -> list[nodes.Node]:
         from vuedec.VueDecompiler import VueDecompiler
 
+        nonMainImports = []
+
         for node in self.ast.getAllNodes():
             assert isinstance(node, nodes.Node)
             if node.type != JSNode.ImportDeclaration:
@@ -139,9 +143,9 @@ class Component:
                 VueDecompiler.getLiteralStr(self.ast.getNode(node.source)))
             if source == self.mainFileName:
                 continue
-            raise NotImplementedError
+            nonMainImports.append(node)
 
-        return []
+        return nonMainImports
 
     def mapComponents(self, components: nodes.ASTNode) -> list[str]:
         """Maps the component list dict inside the component definition to their names,
@@ -167,13 +171,16 @@ class Component:
 
         output = _TEMPLATE
 
-        self.mapFunctions(self.definition, False)
-        self.mapFunctions(self.renderMethod, True)
+        if self.definition:
+            self.mapFunctions(self.definition, False)
+        if self.renderMethod:
+            self.mapFunctions(self.renderMethod, True)
 
         try:
             componentImports = self.mapComponents(self.definition.getByKey("components", self.ast))
-        except KeyError as e:
-            print("KeyError (shouldn't occur):", e)
+        except (KeyError, AttributeError):  # as e:
+            # No components
+            # print("KeyError (shouldn't occur):", e)
             componentImports = []
 
         imports: list[str] = [
@@ -184,14 +191,26 @@ class Component:
         imports.extend(map(lambda x: x.toString(self.ast), self.findNonMainImports()))
         output = output.replace("{IMPORTS}", "\n".join(imports))
 
-        output = output.replace("{DEFINITION}", self.definition.toString(self.ast))
+        if self.definition:
+            output = output.replace("{DEFINITION}", self.definition.toString(self.ast))
+        else:
+            output = output.replace("{DEFINITION}", "/*<NO DEFINITION>*/")
 
-        templateParser = TemplateParser(self)
-        output = output.replace("{TEMPLATE}", templateParser.parse(self.renderMethod))
+        if self.renderMethod:
+            templateParser = TemplateParser(self)
+            output = output.replace("{TEMPLATE}", templateParser.parse(self.renderMethod))
+        else:
+            # TODO Extract the render method from setup()
+            output = output.replace("{TEMPLATE}",
+                                    "<NO RENDER METHOD, see SETUP's return for it maybe?>")
 
         target.set(f"{self.extractName()}.vue", output)
 
     def extractName(self) -> str:
-        definition = self.definition.getByKey("name", self.ast)
-        assert isinstance(definition, nodes.Literal)
-        return definition.value
+        try:
+            definition = self.definition.getByKey("name", self.ast)
+            assert isinstance(definition, nodes.Literal)
+            return definition.value
+        except (KeyError, AttributeError):
+            print(f"Component name not found, using UnknownName instead")
+            return f"UnknownName_{hex(random.randint(0, 0xffffffff))[2:]}"

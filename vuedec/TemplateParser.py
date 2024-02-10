@@ -11,7 +11,7 @@ from kutil.language.languages.javascript.character import TABULATOR
 from kutil.language.languages.javascript.syntax import JSNode
 
 from vuedec import JSParser
-from vuedec.Component import Component, _VUE_RENDER_ARGUMENTS
+from vuedec.Component import Component
 from vuedec.VueDecompiler import VueDecompiler
 
 __all__ = ["TemplateParser"]
@@ -61,7 +61,21 @@ V_NODE_FALLBACK_PARAMS: dict[str, Any] = {
     VARGS.UNKNOWN1: False
 }
 
-BASE_VUE_COMPONENTS: dict[str, str] = {"Fragment": "template", "Transition": "Transition"}
+STATIC_V_NODE_ARGS: list[str] = ["children", "staticCount"]
+
+
+class S_VARGS:  # VNode Args
+    CHILDREN: str = V_NODE_ARGS[0]
+    STATIC_COUNT: str = V_NODE_ARGS[1]
+
+
+STATIC_V_NODE_FALLBACK_PARAMS: dict[str, Any] = {
+    S_VARGS.CHILDREN: None,
+    S_VARGS.STATIC_COUNT: None
+}
+
+BASE_VUE_COMPONENTS: dict[str, str] = {"Fragment": "template", "Transition": "Transition",
+                                       "Static": "template", "Suspense": "Suspense"}
 # TODO implement it properly
 OPTIONAL_LINE_WRAP: int = 50  # Chars
 # https://developer.mozilla.org/en-US/docs/Glossary/Void_element
@@ -79,6 +93,7 @@ class TemplateParser:
     blockStack: list[list | None]
     currentBlock: list | None
     offsetCount: int
+    ctxVForCount: int
 
     def __init__(self, component: Component):
         self.component = component
@@ -90,6 +105,7 @@ class TemplateParser:
         self.blockStack = []
         self.currentBlock = None
         self.offsetCount = 0
+        self.ctxVForCount = 0
 
     # Helper methods
     def extractUsedComponents(self, varDeclaration: nodes.VariableDeclaration):
@@ -98,9 +114,10 @@ class TemplateParser:
             assert isinstance(declarator, nodes.VariableDeclarator)
             cmpVarName = VueDecompiler.getIdentifierName(self.ast.getNode(declarator.id))
             call = self.ast.getNode(declarator.init)
-            assert isinstance(call, nodes.CallExpression)
-            assert VueDecompiler.getIdentifierName(
-                self.ast.getNode(call.callee)) == "resolveComponent"
+            if not isinstance(call, nodes.CallExpression):
+                continue
+            if VueDecompiler.getIdentifierName(self.ast.getNode(call.callee)) != "resolveComponent":
+                continue
             cmpName = VueDecompiler.getLiteralStr(self.ast.getNode(call.arguments[0]))
 
             assert cmpVarName not in BASE_VUE_COMPONENTS, f"{cmpVarName} is a Vue component name"
@@ -134,7 +151,8 @@ class TemplateParser:
                     varName = VueDecompiler.getIdentifierName(self.ast.getNode(declarator.id))
 
                     initI: int | None = declarator.init
-                    assert initI is not None
+                    if initI is None:
+                        continue
 
                     init = self.ast.getNode(initI)
                     assert isinstance(init, nodes.Node)
@@ -175,8 +193,44 @@ class TemplateParser:
             self.currentBlock.append(thing)
         return thing
 
-    def parseNormalizeStyle(self, node: nodes.CallExpression) -> str:
-        return '"NORMALIZE STYLE"'
+    @staticmethod
+    def surroundString(inp: str) -> str:
+        if len(inp) > 2 and inp.startswith('"') and inp.endswith('"') and '"' not in inp[1:-1]:
+            return inp
+        return '"' + inp.replace('"', "'") + '"'
+
+    def parseNormalizeClass(self, node: nodes.CallExpression) -> tuple[str, dict[str, Any] | None]:
+        assert len(node.arguments) == 1
+        toNormalize: nodes.Node = nodes.getAstNode(self.ast, node.arguments[0])
+        if isinstance(toNormalize, nodes.Literal):
+            return toNormalize.raw, None
+
+        normalizeDynamic: list[str] = []
+        normalizeStatic: list[str] = []
+
+        if isinstance(toNormalize, nodes.ArrayExpression):
+            for item in self.ast.getNodes(toNormalize.elements):
+                if isinstance(item, nodes.Literal):
+                    normalizeStatic.append(item.raw)
+                else:
+                    assert isinstance(item, nodes.Node)
+                    normalizeDynamic.append(item.toString(self.ast, self.offset, False))
+        else:
+            normalizeDynamic.append(toNormalize.toString(self.ast, self.offset, False))
+
+        staticString: str = self.surroundString(" ".join(normalizeStatic))
+        dynamicString: str | None = None
+        if len(normalizeDynamic) > 0:
+            if len(normalizeDynamic) == 1:
+                dynamicString = self.surroundString(normalizeDynamic[0])
+            else:
+                dynamicString = self.surroundString('[' + ", ".join(normalizeDynamic) + ']')
+
+        return staticString, {":class": dynamicString} if dynamicString else None
+
+    def parseNormalizeStyle(self, node: nodes.CallExpression) -> tuple[str, dict[str, Any] | None]:
+        # TODO Normalize style
+        return '"NORMALIZE STYLE"', None
 
     def parseMethodHandler(self, node: nodes.BinaryExpression) -> str | None:
         # _cache[0] || _cache[0] = <method>
@@ -188,16 +242,20 @@ class TemplateParser:
 
         return method.toString(self.ast, self.offset, False)
 
-    def parseAttributeCall(self, node: nodes.Node) -> str | None:
+    def parseAttributeCall(self, node: nodes.Node) -> tuple[str | None, dict[str, Any] | None]:
         if isinstance(node, nodes.CallExpression):
-            name = VueDecompiler.getIdentifierName(self.ast.getNode(node.callee))
-            if name == "normalizeClass":
-                # TODO What is the difference between normalizeClass and normalizeStyle?
+            callee = self.ast.getNode(node.callee)
+            if not isinstance(callee, nodes.Identifier):
+                return None, None
+            name = VueDecompiler.getIdentifierName(callee)
+            if name == "normalizeStyle":
                 return self.parseNormalizeStyle(node)
+            elif name == "normalizeClass":
+                return self.parseNormalizeClass(node)
         elif isinstance(node, nodes.BinaryExpression):
             if node.operator == "||":
-                return self.parseMethodHandler(node)
-        return None
+                return self.parseMethodHandler(node), None
+        return None, None
 
     def parseSlots(self, node: nodes.ObjectExpression) -> str | None:
         # TODO Deal better with only the default slot
@@ -206,8 +264,7 @@ class TemplateParser:
         # <template #slotId /> - yes
         slots: list[str] = []
 
-        oldOffset = self.offsetCount
-        self.offsetCount = 0
+        defaultSlot: str | None = None
 
         for key, value in node.items(self.ast):
             if isinstance(key, nodes.Identifier):
@@ -221,20 +278,70 @@ class TemplateParser:
             if slotName == "_":
                 continue
 
-            slots.append(self.parseTemplate(value, {f"#{slotName}": None}))
+            if slotName == "default":
+                slotBodyWithoutOffset = self.parseTemplate(value)
+                defaultSlot = slotBodyWithoutOffset
+
+            self.tab()
+            slotBody = self.parseTemplate(value)
+            self.unTab()
+
+            slots.append(f"<template #{slotName}>{NL}{slotBody}{NL}{self.offset}</template>")
 
         if len(slots) == 0:
             raise ValueError("There must be at least 1 slot")
 
-        self.offsetCount = oldOffset
+        if len(slots) == 1 and defaultSlot is not None:
+            # assert defaultSlot is not None, "The only slot isn't the 'default' slot"
+            return defaultSlot
 
-        slots = list(map(lambda slot: self.offsetStringBy(slot, self.offset), slots))
-
-        return "".join(slots)
+        return NL.join(slots)
 
     @staticmethod
     def offsetStringBy(string: str, off: str) -> str:
         return NL.join(map(lambda line: off + line, string.split(NL)))
+
+    def parseAttributeToString(self, name: str, value: str | nodes.Node, attributeList: list[str],
+                               dynProps: list[str] | None = None) -> None:
+        if value is None:
+            attributeList.append(name)
+            return
+
+        isAsString = False
+
+        if isinstance(value, nodes.Node):
+            # TODO Add all values
+            # TODO For some reason :onClick appears inside renderList
+            isAsString = value.type in {JSNode.Literal} or name in {"onClick"}
+
+            valueStr, additionalAttributes = self.parseAttributeCall(value)
+            if additionalAttributes is not None:
+                # Used by normalizeStyle and normalizeClass in order to add new attributes
+                for key, val in additionalAttributes.items():
+                    self.parseAttributeToString(key, val, attributeList, dynProps)
+            if valueStr is None:
+                if isinstance(value, nodes.StaticNode):
+                    valueStr = str(value.toDataOrString(self.ast)).strip()
+                else:
+                    valueStr = value.toString(self.ast, self.offset, False)
+
+            if not valueStr.startswith('"') and not valueStr.endswith('"'):
+                if not isAsString:
+                    name = ":" + name
+                valueStr = self.surroundString(valueStr)
+        else:
+            valueStr = value
+
+        if not valueStr or valueStr == '""':
+            # TODO Fix attributes such as "disabled"
+            return
+
+        isDynamic = dynProps is not None and name in dynProps
+        if isAsString and self.ctxVForCount > 0:
+            # Patch :onClick within v-for
+            isDynamic = False
+
+        attributeList.append(f"{':' if isDynamic else ''}{name}={self.surroundString(valueStr)}")
 
     # Vue method parsing
     def parseCreateBaseVNode(self, node: nodes.CallExpression,
@@ -260,21 +367,7 @@ class TemplateParser:
 
         attributeList: list[str] = []
         for paramName, value in addAttributes.items():
-            if value is None:
-                attributeList.append(paramName)
-                continue
-
-            if isinstance(value, nodes.Node):
-                if isinstance(value, nodes.StaticNode):
-                    valueStr = value.toDataStr(self.ast)
-                else:
-                    valueStr = value.toString(self.ast, self.offset, False)
-            else:
-                valueStr = value
-            if valueStr.startswith('"') and valueStr.endswith('"'):
-                attributeList.append(f"{paramName}={valueStr}")
-            else:
-                attributeList.append(f'{paramName}="{valueStr}"')
+            self.parseAttributeToString(paramName, value, attributeList)
 
         if dynProps is not None:
             if isinstance(dynProps, nodes.Identifier):
@@ -297,33 +390,19 @@ class TemplateParser:
                 props = props.toData(self.ast)
         if props is not None:
             assert isinstance(props, nodes.ObjectExpression)
-            newPropsDict = {}
             for key, value in props.items(self.ast):
                 if isinstance(key, nodes.StaticNode):
-                    keyStr = key.toDataOrString(self.ast)
+                    keyStr = key.toDataOrString(self.ast, self.offset, False)
                 else:
-                    keyStr = key.toString(self.ast)
-                # TODO Add all values
-                # TODO For some reason :onClick appears inside renderList
-                isAsString = value.type in {JSNode.Literal} or keyStr in {"onClick"}
+                    keyStr = key.toString(self.ast, self.offset, False)
 
-                valStr = self.parseAttributeCall(value)
-                if valStr is None:
-                    if isinstance(value, nodes.StaticNode):
-                        valStr = str(value.toDataOrString(self.ast)).strip()
-                    else:
-                        valStr = value.toString(self.ast)
+                self.parseAttributeToString(keyStr, value, attributeList, dynProps)
 
-                # TODO Fix attributes being not properly 'escaped'
-                if valStr.startswith('"') and valStr.endswith('"'):
-                    newPropsDict[keyStr] = valStr
-                else:
-                    newPropsDict[("" if isAsString else ":") + keyStr] = '"' + valStr + '"'
-            props = newPropsDict
-
-            for key, value in props.items():
-                isDynamic = dynProps is not None and key in dynProps
-                attributeList.append(f"{':' if isDynamic else ''}{key}={value}")
+        attributeList = list(map(
+            lambda x: "".join(map(lambda line: line.strip(), x.split(NL))) if x.count(
+                NL) < 3 else x,
+            attributeList
+        ))
 
         attributes: str | None = (" " + " ".join(attributeList)) if len(attributeList) > 0 else ""
 
@@ -346,7 +425,7 @@ class TemplateParser:
                 children = None
             elif (isinstance(childrenList, nodes.StaticNode) and
                   not isinstance(childrenList, nodes.ArrayExpression)):
-                string = str(childrenList.toData(self.ast)).strip()
+                string = off + TABULATOR + str(childrenList.toData(self.ast)).strip()
             elif isinstance(childrenList, nodes.CallExpression):
                 string = self.parseTemplate(childrenList)
 
@@ -363,7 +442,7 @@ class TemplateParser:
                 if len(string) < OPTIONAL_LINE_WRAP and NL not in string:
                     children = string.strip()
                 else:
-                    children = off + TABULATOR + string
+                    children = string
             self.unTab()
 
             if children is not None and children.endswith(NL):
@@ -392,12 +471,13 @@ class TemplateParser:
         return f"{off}<{nodeType}{attributes}>{body}</{nodeType}>"
 
     def parseCreateVNode(self, node: nodes.CallExpression,
-                         addAttributes: dict[str, Any] | None = None) -> str:
+                         addAttributes: dict[str, Any] | None = None,
+                         paramOverrides: dict[str, Any] | None = None) -> str:
         # Params as following: type, props, children, patchFlag, dynamicProps, unknown1
         # return createBaseVNode(type, props, children, patchFlag, dynamicProps, <not an argument>,
         #   unknown1, true)
         params = self.getParamsFromFnCall(node, V_NODE_ARGS,
-                                          None,
+                                          paramOverrides,
                                           V_NODE_FALLBACK_PARAMS)
         # This is to make sure the params provided won't be overwritten
         newNode = nodes.CallExpression(node.callee, [])
@@ -429,6 +509,39 @@ class TemplateParser:
             BVARGS.UNKNOWN2: True,
         }, addAttributes)
 
+    def parseCreateStaticVNode(self, node: nodes.CallExpression,
+                               addAttributes: dict[str, Any] | None = None,
+                               paramOverrides: dict[str, Any] | None = None) -> str:
+        # Params as following: type, props, children, staticCount
+        # function createStaticVNode(e, t) {
+        #     const r = createVNode(Static, null, e);
+        #     return r.staticCount = t, r
+        # }
+        params = self.getParamsFromFnCall(node, STATIC_V_NODE_ARGS,
+                                          paramOverrides,
+                                          STATIC_V_NODE_FALLBACK_PARAMS)
+        # This is to make sure the params provided won't be overwritten
+        newNode = nodes.CallExpression(node.callee, [])
+
+        return self.parseCreateVNode(newNode, addAttributes, {
+            VARGS.TYPE: "Static",  # nodeType,
+            VARGS.PROPS: None,
+            VARGS.CHILDREN: params[S_VARGS.CHILDREN]
+        })
+
+    def parseCreateTextVNode(self, node: nodes.CallExpression) -> str:
+        assert len(node.arguments) <= 2
+
+        if len(node.arguments) == 0:
+            string = '" "'
+        else:
+            textNode = nodes.getAstNode(self.ast, node.arguments[0])
+            string = textNode.toString(self.ast, self.offset, False)
+
+        if string.startswith('"') and string.endswith('"'):
+            return self.offset + string[1:-1]
+        return f"{self.offset}{{{string}}}"
+
     def parseCreateElementBlock(self, node: nodes.CallExpression,
                                 addAttributes: dict[str, Any] | None = None) -> str:
         assert len(node.arguments) <= 6
@@ -446,23 +559,50 @@ class TemplateParser:
         # Params as following: list, render method, ?, ?
         # assert 2 <= len(node.arguments) <= 4
         assert len(node.arguments) == 2
+        # TODO More arguments possible
 
-        srcIterable = nodes.getAstNode(self.ast, node.arguments[0]).toString(self.ast)
+        srcIterable = nodes.getAstNode(self.ast, node.arguments[0]).toString(self.ast, self.offset,
+                                                                             False)
         renderMethod = nodes.getAstNode(self.ast, node.arguments[1])
         assert isinstance(renderMethod, nodes.ArrowFunctionExpression)
 
-        argumentsStr = ", ".join(nodes.getAstNodeStrings(self.ast, renderMethod.params))
+        args = nodes.getAstNodeStrings(self.ast, renderMethod.params)
 
-        return self.parseRenderMethod(renderMethod, {
+        if len(args) == 1:
+            argumentsStr = args[0]
+        else:
+            argumentsStr = "(" + ", ".join(args) + ")"
+
+        self.ctxVForCount += 1
+        VForContent = self.parseRenderMethod(renderMethod, {
             "v-for": f"{argumentsStr} in {srcIterable}"
         })
+        self.ctxVForCount -= 1
+
+        return VForContent
+
+    def parseRenderSlot(self, node: nodes.CallExpression,
+                        addAttributes: dict[str, Any] | None = None) -> str:
+        assert 2 <= len(node.arguments) <= 5  # Throw away
+        # assert len(node.arguments) == 2
+        # TODO Maybe the additional arguments have effect?
+
+        slotName = nodes.getAstNode(self.ast, node.arguments[1]).toString(self.ast, self.offset,
+                                                                          False)
+
+        assert addAttributes is None or len(addAttributes) == 0
+
+        # TODO Use createVNode or something
+        # TODO More arguments possible
+
+        return f"{self.offset}<slot{f"name={self.surroundString(slotName)}" if slotName != "default" else ''} />"
 
     def parseToDisplayString(self, node: nodes.CallExpression,
                              addAttributes: dict[str, Any] | None = None) -> str:
         # Params as following: string
         assert len(node.arguments) == 1
         string = nodes.getAstNode(self.ast, node.arguments[0])
-        stringStr = string.toString(self.ast).strip()
+        stringStr = string.toString(self.ast, self.offset, False).strip()
         return f"{self.offset}{{{stringStr}}}"
 
     def parseWithCtx(self, node: nodes.CallExpression,
@@ -472,6 +612,19 @@ class TemplateParser:
         renderMethod = nodes.getAstNode(self.ast, node.arguments[0])
         assert isinstance(renderMethod, nodes.ArrowFunctionExpression), "Invalid withCtx argument"
         return self.parseRenderMethod(renderMethod, addAttributes)
+
+    def parseWithDirectives(self, node: nodes.CallExpression,
+                            addAttributes: dict[str, Any] | None = None) -> str:
+        # Params as following: node, ?
+        # TODO With directives - v-model
+        assert 1 <= len(node.arguments) <= 2
+        node = nodes.getAstNode(self.ast, node.arguments[0])
+
+        if addAttributes is None:
+            addAttributes = {}
+        addAttributes["v-model"] = "TODO"
+
+        return self.parseTemplate(node, addAttributes)
 
     def parseRenderMethod(self, node: nodes.ArrowFunctionExpression,
                           addAttributes: dict[str, Any] | None = None) -> str:
@@ -518,16 +671,24 @@ class TemplateParser:
                 return self.parseCreateBaseVNode(node, addAttributes=addAttributes)
             elif funcName == "createVNode":
                 return self.parseCreateVNode(node, addAttributes=addAttributes)
+            elif funcName == "createStaticVNode":
+                return self.parseCreateStaticVNode(node, addAttributes=addAttributes)
+            elif funcName == "createTextVNode":
+                return self.parseCreateTextVNode(node)
             elif funcName == "createElementBlock":
                 return self.parseCreateElementBlock(node, addAttributes=addAttributes)
             elif funcName == "createBlock":
                 return self.parseCreateBlock(node, addAttributes=addAttributes)
             elif funcName == "renderList":
                 return self.parseRenderList(node, addAttributes=addAttributes)
+            elif funcName == "renderSlot":
+                return self.parseRenderSlot(node, addAttributes=addAttributes)
             elif funcName == "toDisplayString":
                 return self.parseToDisplayString(node, addAttributes=addAttributes)
             elif funcName == "withCtx":
                 return self.parseWithCtx(node, addAttributes=addAttributes)
+            elif funcName == "withDirectives":
+                return self.parseWithDirectives(node, addAttributes=addAttributes)
             elif funcName == "createCommentVNode":
                 return ""
             else:
@@ -539,6 +700,8 @@ class TemplateParser:
             call = self.varPool[varName]
             self.component.mapFunctions(call, False, True)
             return self.parseTemplate(call, addAttributes)
+        elif isinstance(node, nodes.Literal):
+            return f"{self.offset}{node.type}"
         elif isinstance(node, nodes.ConditionalExpression):
             # TODO implement v-else-if
             ifBranch = nodes.getAstNode(self.ast, node.consequent)
@@ -571,15 +734,18 @@ class TemplateParser:
         self.blockStack.clear()
         self.currentBlock = None
         self.offsetCount = 0
+        self.ctxVForCount = 0
 
         body = self.ast.getNode(renderMethod.body)
         assert isinstance(body, nodes.BlockStatement)
-        assert len(body.body) == 2  # resolveComponent(s) + return
-        varDeclaration = self.ast.getNode(body.body[0])
-        assert isinstance(varDeclaration, nodes.VariableDeclaration)
-        self.extractUsedComponents(varDeclaration)
-        returnStatement = self.ast.getNode(body.body[1])
+        assert len(body.body) > 0  # resolveComponent(s) + return
+        for item in body.body[:-1]:
+            varDeclaration = self.ast.getNode(item)
+            if not isinstance(varDeclaration, nodes.VariableDeclaration):
+                continue
+            self.extractUsedComponents(varDeclaration)
+        returnStatement = self.ast.getNode(body.body[-1])
         assert isinstance(returnStatement, nodes.ReturnStatement)
         returnThing = self.ast.getNode(returnStatement.argument)
-        assert isinstance(returnThing, nodes.SequenceExpression)
+        assert isinstance(returnThing, nodes.Node)
         return self.parseTemplate(returnThing)

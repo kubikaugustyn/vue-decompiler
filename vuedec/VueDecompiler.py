@@ -3,6 +3,7 @@ __author__ = "kubik.augustyn@post.cz"
 
 import json
 
+from kutil.io import enumFiles
 from kutil.language.AST import ASTNode, AST
 from kutil.language.languages.javascript import nodes
 from kutil.language.languages.javascript.syntax import JSNode
@@ -45,13 +46,20 @@ class VueDecompiler:
         f = self.source
         u = self.ui
         if not f.has(self.mainFileName):
-            self.mainFileName = u.ask("Enter main file name: ")
+            self.mainFileName = u.ask("Enter main file name (note that a bad name may break the"
+                                      " code because of import specifier mapping): ")
         i = JSParser(f, self.mainFileName, u, self.cache, immediately_parse=False)
         self.extractFunctionNames(i)
         # print(self.functionMap)
-        other_file_name = "Badges.js" if f.has("Badges.js") else u.ask("Enter other file name: ")
-        other_file = JSParser(f, other_file_name, u, self.cache)
-        self.decompileFile(other_file)
+        for other_file_name, _ in enumFiles(f.path, extendedInfo=False):
+            assert f.has(other_file_name), f"No such file '{other_file_name}' found"  # Wtf
+
+            if other_file_name == self.mainFileName or not other_file_name.endswith(
+                    ".min.js") or not other_file_name[0].istitle():
+                continue
+
+            other_file = JSParser(f, other_file_name, u, self.cache)
+            self.decompileFile(other_file)
 
     def extractFunctionNames(self, indexJS: JSParser):
         c = Cache("vue-decompiler-fn-map", self.cache)
@@ -173,31 +181,54 @@ class VueDecompiler:
                     assert isinstance(declarator, nodes.VariableDeclarator)
                     cmpName = self.getIdentifierName(ast.getNode(declarator.id))
 
+                    if declarator.init is None:
+                        continue
+
                     componentVarInit = ast.getNode(declarator.init)
                     if not isinstance(componentVarInit, nodes.CallExpression):
                         continue
 
-                    if not self.isIdentifierName(ast.getNode(componentVarInit.callee),
-                                                 "_export_sfc",
-                                                 fnMap):
+                    callee = ast.getNode(componentVarInit.callee)
+
+                    if not isinstance(callee, nodes.Identifier):
                         continue
 
-                    definitionName = self.getIdentifierName(
-                        ast.getNode(componentVarInit.arguments[0]))
-                    infoList = ast.getNode(componentVarInit.arguments[1])
-                    assert isinstance(infoList, nodes.ArrayExpression)
-                    renderList = ast.getNode(infoList.elements[0])
-                    assert isinstance(renderList, nodes.ArrayExpression)
-                    assert self.getLiteralStr(ast.getNode(renderList.elements[0]))
-                    renderFnName = self.getIdentifierName(ast.getNode(renderList.elements[1]))
+                    if self.isIdentifierName(callee,
+                                             "_export_sfc",
+                                             fnMap):
+                        definitionName = self.getIdentifierName(
+                            ast.getNode(componentVarInit.arguments[0]))
+                        infoList = ast.getNode(componentVarInit.arguments[1])
+                        assert isinstance(infoList, nodes.ArrayExpression)
+                        renderList = ast.getNode(infoList.elements[0])
+                        assert isinstance(renderList, nodes.ArrayExpression)
+                        assert self.getLiteralStr(ast.getNode(renderList.elements[0]))
+                        renderFnName = self.getIdentifierName(ast.getNode(renderList.elements[1]))
 
-                    cmpDefinitionCall = self.findMethodCall(definitionName, moduleNodes, ast)
-                    assert self.isIdentifierName(ast.getNode(cmpDefinitionCall.callee),
-                                                 "defineComponent", fnMap)
-                    cmpDefinition = ast.getNode(cmpDefinitionCall.arguments[0])
-                    assert isinstance(cmpDefinition, nodes.ObjectExpression)
+                        try:
+                            cmpDefinitionCall = self.findMethodCall(definitionName, moduleNodes,
+                                                                    ast)
+                        except AssertionError:
+                            cmpDefinitionCall = None
+                    else:
+                        cmpDefinitionCall = componentVarInit
 
-                    renderMethod = self.findMethodDeclarator(renderFnName, moduleNodes, ast)
+                        if not self.isIdentifierName(ast.getNode(cmpDefinitionCall.callee),
+                                                     "defineComponent", fnMap):
+                            continue
+
+                        renderFnName = None
+
+                    if cmpDefinitionCall is not None:
+                        assert self.isIdentifierName(ast.getNode(cmpDefinitionCall.callee),
+                                                     "defineComponent", fnMap)
+                        cmpDefinition = ast.getNode(cmpDefinitionCall.arguments[0])
+                        assert isinstance(cmpDefinition, nodes.ObjectExpression)
+                    else:
+                        cmpDefinition = None
+
+                    renderMethod = self.findMethodDeclarator(renderFnName, moduleNodes,
+                                                             ast) if renderFnName else None
 
                     cmp: Component = Component(srcFile, ast, moduleNodes, cmpDefinition,
                                                renderMethod, fnMap, fnReverseMap, self.mainFileName)
@@ -208,7 +239,7 @@ class VueDecompiler:
                     else:
                         returnOthers.append(cmp)
         if returnKnown is None:
-            raise KeyError("Component declaration not found")
+            raise KeyError(f"Component '{knownName}' declaration not found")
 
         return returnKnown, returnOthers
 
