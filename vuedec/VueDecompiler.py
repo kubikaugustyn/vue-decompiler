@@ -54,8 +54,9 @@ class VueDecompiler:
         for other_file_name, _ in enumFiles(f.path, extendedInfo=False):
             assert f.has(other_file_name), f"No such file '{other_file_name}' found"  # Wtf
 
-            if other_file_name == self.mainFileName or not other_file_name.endswith(
-                    ".min.js") or not other_file_name[0].istitle():
+            if other_file_name == self.mainFileName or not (
+                    other_file_name.endswith(".js") and not other_file_name.endswith(
+                    ".min.js")) or not other_file_name[0].istitle():
                 continue
 
             other_file = JSParser(f, other_file_name, u, self.cache)
@@ -173,6 +174,7 @@ class VueDecompiler:
             -> tuple[Component, list[Component]]:
         returnKnown: Component | None = None
         returnOthers: list[Component] = []
+        componentByName: dict[str, Component] = {}
 
         for node in moduleNodes:
             if node.type is JSNode.VariableDeclaration:
@@ -232,8 +234,20 @@ class VueDecompiler:
 
                     cmp: Component = Component(srcFile, ast, moduleNodes, cmpDefinition,
                                                renderMethod, fnMap, fnReverseMap, self.mainFileName)
-                    srcFile.registerComponent(cmp, cmp.extractName(), cmpName,
+
+                    componentName = cmp.extractName()
+                    if componentName in componentByName:
+                        # Unregister the component
+                        # Basically, defineComponent is considered a component
+                        # before _export_sfc occurs, tricking the program into
+                        # thinking there were 2 components of such name
+                        if componentByName[componentName] in returnOthers:
+                            returnOthers.remove(componentByName[componentName])
+                        srcFile.unregisterComponent(componentName)
+                    componentByName[componentName] = cmp
+                    srcFile.registerComponent(cmp, componentName, cmpName,
                                               declarator)
+
                     if cmpName == knownName:
                         returnKnown = cmp
                     else:

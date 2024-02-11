@@ -286,7 +286,7 @@ class TemplateParser:
             slotBody = self.parseTemplate(value)
             self.unTab()
 
-            slots.append(f"<template #{slotName}>{NL}{slotBody}{NL}{self.offset}</template>")
+            slots.append(f"{self.offset}<template #{slotName}>{NL}{slotBody}{NL}{self.offset}</template>")
 
         if len(slots) == 0:
             raise ValueError("There must be at least 1 slot")
@@ -320,10 +320,10 @@ class TemplateParser:
                 for key, val in additionalAttributes.items():
                     self.parseAttributeToString(key, val, attributeList, dynProps)
             if valueStr is None:
-                if isinstance(value, nodes.StaticNode):
-                    valueStr = str(value.toDataOrString(self.ast)).strip()
-                else:
-                    valueStr = value.toString(self.ast, self.offset, False)
+                # if isinstance(value, nodes.StaticNode):
+                #     valueStr = str(value.toDataOrString(self.ast)).strip()
+                # else:
+                valueStr = value.toString(self.ast, self.offset, False)
 
             if not valueStr.startswith('"') and not valueStr.endswith('"'):
                 if not isAsString:

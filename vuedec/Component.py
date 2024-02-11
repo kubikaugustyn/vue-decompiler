@@ -3,6 +3,7 @@ __author__ = "kubik.augustyn@post.cz"
 
 import random
 
+from kutil import NL
 from kutil.language.AST import AST, ASTNode
 from kutil.language.languages.javascript import nodes
 from kutil.language.languages.javascript.syntax import JSNode
@@ -39,6 +40,7 @@ class Component:
     functionMap: dict[str, str]
     functionReverseMap: dict[str, str]
     mainFileName: str
+    componentName: str | None
 
     vueImports: set[str]
     mainImports: set[str]
@@ -56,6 +58,7 @@ class Component:
         self.functionMap = functionMap
         self.functionReverseMap = functionReverseMap
         self.mainFileName = mainFileName
+        self.componentName = None
 
         self.vueImports = set()
         self.mainImports = set()
@@ -96,6 +99,9 @@ class Component:
                 assert isinstance(mapToName, nodes.Identifier)
                 argMap[mapToName.name] = arg
 
+        # if self.extractName() == "AdminMarkdownModule":
+        #     pass
+
         for parent, identifier in self._traverseFromNode(node):
             if identifier.type is JSNode.Identifier:
                 assert isinstance(identifier, nodes.Identifier)
@@ -113,9 +119,15 @@ class Component:
                         self.ast.replaceNode(parent, srcProp.clone())
 
                     continue
+                # TODO What if {thing: au} is outside the components definition?
                 if (identifier.name not in self.functionReverseMap or
-                        parent.type is not JSNode.CallExpression):
+                        parent.type not in (JSNode.CallExpression, JSNode.Property)):
+                    # Either call - createBaseVNode, or property - components: {Button: au}
                     continue
+                if parent.type is JSNode.Property:
+                    assert isinstance(parent, nodes.Property)
+                    if self.ast.getNode(parent.value) != identifier:
+                        continue
                 # Map imported thing to its index.js local name
                 identifier.name = self.functionReverseMap[identifier.name]
                 if isRenderMethod or isInsideRenderMethod:
@@ -128,10 +140,8 @@ class Component:
         #     print("VUE:", self.vueImports)
         #     print("MAIN:", self.mainImports)
 
-    def findNonMainImports(self) -> list[nodes.Node]:
-        from vuedec.VueDecompiler import VueDecompiler
-
-        nonMainImports = []
+    def findAllImports(self) -> list[nodes.Node]:
+        allImports = []
 
         for node in self.ast.getAllNodes():
             assert isinstance(node, nodes.Node)
@@ -139,13 +149,9 @@ class Component:
                 continue
             assert isinstance(node, nodes.ImportDeclaration)
 
-            source = VueDecompiler.absPath(
-                VueDecompiler.getLiteralStr(self.ast.getNode(node.source)))
-            if source == self.mainFileName:
-                continue
-            nonMainImports.append(node)
+            allImports.append(node)
 
-        return nonMainImports
+        return allImports
 
     def mapComponents(self, components: nodes.ASTNode) -> list[str]:
         """Maps the component list dict inside the component definition to their names,
@@ -156,18 +162,39 @@ class Component:
         for i, (key, value) in enumerate(components.items(self.ast)):
             if not isinstance(value, nodes.Identifier):
                 continue
+            if not isinstance(key, nodes.Identifier):
+                continue
             if value.name not in self.functionReverseMap:
-                componentName = self.sourceFile.findComponentNameByVarName(value.name)
-                imports.append(f"import {componentName} from '{componentName}.vue'", )
-                value.name = componentName
+                if value.name in self.mainImports or value.name in self.vueImports:
+                    continue
+                try:
+                    componentName = self.sourceFile.findComponentNameByVarName(value.name, key.name)
+                    imports.append(f"import {componentName} from './{componentName}.vue'")
+                    value.name = componentName
+                except KeyError:
+                    try:
+                        componentName, originalImport = self.sourceFile.findComponentNameByImport(
+                            value.name, key.name)
+                        imports.append(f"import {componentName} from './{componentName}.vue'"
+                                       f" /*{originalImport}*/")
+                        value.name = componentName
+                    except KeyError:
+                        rndName = self.randomUnknownComponentName()
+                        imports.append(f"import {rndName} from './{rndName}.vue' /*Unknown,"
+                                       f" renamed from {key.name} as {value.name}*/")
+                        value.name = rndName
                 continue
             # The component is defined inside the main file
             value.name = self.functionReverseMap[value.name]
             self.mainImports.add(value.name)
+
         return imports
 
     def decompile(self, target: Files):
         from vuedec.TemplateParser import TemplateParser
+
+        if target.has(f"{self.extractName()}.vue"):
+            raise RuntimeError(f"Component '{self.extractName()}' already decompiled")
 
         output = _TEMPLATE
 
@@ -183,13 +210,19 @@ class Component:
             # print("KeyError (shouldn't occur):", e)
             componentImports = []
 
-        imports: list[str] = [
-            f"import {{{', '.join(self.vueImports)}}} from 'vue'",
-            f"import {{{', '.join(self.mainImports)}}} from '{self.mainFileName}'",
-            *componentImports
-        ]
-        imports.extend(map(lambda x: x.toString(self.ast), self.findNonMainImports()))
-        output = output.replace("{IMPORTS}", "\n".join(imports))
+        imports: list[str] = []
+        if len(self.vueImports) > 0:
+            imports.append(f"import {{{', '.join(self.vueImports)}}} from 'vue'")
+        if len(self.mainImports) > 0:
+            imports.append(f"import {{{', '.join(self.mainImports)}}} from '{self.mainFileName}'")
+        imports.extend(componentImports)
+
+        imports.append(f"/*Original imports, might help you find the"
+                       f" needed variables that are  being imported*/{NL}/*")
+        imports.extend(map(lambda x: x.toString(self.ast), self.findAllImports()))
+        imports.append("*/")
+
+        output = output.replace("{IMPORTS}", NL.join(imports))
 
         if self.definition:
             output = output.replace("{DEFINITION}", self.definition.toString(self.ast))
@@ -207,10 +240,18 @@ class Component:
         target.set(f"{self.extractName()}.vue", output)
 
     def extractName(self) -> str:
+        if self.componentName is not None:
+            return self.componentName
+
         try:
             definition = self.definition.getByKey("name", self.ast)
             assert isinstance(definition, nodes.Literal)
-            return definition.value
+            self.componentName = definition.value
         except (KeyError, AttributeError):
-            print(f"Component name not found, using UnknownName instead")
-            return f"UnknownName_{hex(random.randint(0, 0xffffffff))[2:]}"
+            # print(f"Component name not found, using UnknownName instead")
+            self.componentName = self.randomUnknownComponentName()
+        return self.componentName
+
+    @staticmethod
+    def randomUnknownComponentName() -> str:
+        return f"UnknownName_{hex(random.randint(0, 0xffffffff))[2:]}"

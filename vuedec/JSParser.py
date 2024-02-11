@@ -2,6 +2,7 @@
 __author__ = "kubik.augustyn@post.cz"
 
 import os
+import re
 import zlib
 
 from kutil.language.AST import AST
@@ -9,7 +10,6 @@ from kutil.language.languages.javascript import parseModule, nodes, Module
 from kutil.language.languages.javascript.JSOptions import JSOptions
 from kutil.language.languages.javascript.syntax import JSNode, JSToken
 from kutil.language.languages.javascript.JSLexer import RawToken
-
 
 from vuedec.types import TComponent
 from vuedec.DecompilerUI import DecompilerUI
@@ -93,8 +93,40 @@ class JSParser:
                           varNode: nodes.VariableDeclarator):
         self.componentMap[name] = (component, varNode, varName)
 
-    def findComponentNameByVarName(self, varName: str) -> str:
+    def unregisterComponent(self, name: str):
+        del self.componentMap[name]
+
+    def findComponentNameByVarName(self, varName: str, otherVarName: str | None = None) -> str:
         for key, (_, _, cmpVarName) in self.componentMap.items():
             if cmpVarName == varName:
                 return key
+            if otherVarName is not None and otherVarName == cmpVarName:
+                return key
+        raise KeyError("Component var name not found")
+
+    def findComponentNameByImport(self, importedName: str, usedName: str) -> tuple[str, str]:
+        from vuedec.VueDecompiler import VueDecompiler
+
+        for node in self.ast.getNodes(self.entryPoint.body):
+            if node.type is not JSNode.ImportDeclaration:
+                continue
+            assert isinstance(node, nodes.ImportDeclaration)
+
+            sourceNode = self.ast.getNode(node.source)
+            assert isinstance(sourceNode, nodes.Literal)
+
+            # source = VueDecompiler.absPath(str(sourceNode.value))
+            # match = re.match(r"([A-Za-z]+)([\w\W]+)(.min)?(.js)?", source)
+            # source = match.group(1)
+
+            for specifier in self.ast.getNodes(node.specifiers):
+                assert isinstance(specifier, nodes.ImportSpecifier)
+
+                localNode = self.ast.getNode(specifier.local)
+                assert isinstance(localNode, nodes.Identifier)
+
+                if localNode.name != importedName and localNode.name != usedName:
+                    continue
+
+                return usedName, node.toString(self.ast)
         raise KeyError("Component var name not found")
