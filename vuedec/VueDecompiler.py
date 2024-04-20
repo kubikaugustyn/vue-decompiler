@@ -56,7 +56,7 @@ class VueDecompiler:
 
             if other_file_name == self.mainFileName or not (
                     other_file_name.endswith(".js") and not other_file_name.endswith(
-                    ".min.js")) or not other_file_name[0].istitle():
+                ".min.js")) or not other_file_name[0].istitle():
                 continue
 
             other_file = JSParser(f, other_file_name, u, self.cache)
@@ -81,7 +81,8 @@ class VueDecompiler:
             for spec in ast.getNodes(export.specifiers):
                 assert isinstance(spec, nodes.ExportSpecifier)
 
-                localName: str = self.getIdentifierName(ast.getNode(spec.local)).partition("$")[0]
+                localName: str = self.getIdentifierName(
+                    ast.getNode(spec.local))  # .partition("$")[0] # I forgot why
                 exportedName: str = self.getIdentifierName(ast.getNode(spec.exported))
 
                 assert localName not in self.functionMap
@@ -194,6 +195,8 @@ class VueDecompiler:
 
                     if not isinstance(callee, nodes.Identifier):
                         continue
+                    print(callee.name, fnMap.get(callee.name))
+                    # TODO Fix
 
                     if self.isIdentifierName(callee,
                                              "_export_sfc",
@@ -273,6 +276,7 @@ class VueDecompiler:
             fnMap = self.functionMap
 
         if name not in fnMap:
+            # TODO THE FRICKING FUNCTION NAMES ARE OBFUSCATED TOO NOW EVEN WITHIN THE index.js FILE
             return False
         cmpName = self.getIdentifierName(identifier)
         return cmpName == fnMap[name]
